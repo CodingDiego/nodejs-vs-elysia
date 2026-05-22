@@ -89,3 +89,17 @@ Notas importantes:
 - Performance: muestras p50/p95/max con la misma carga para ambos backends.
 - Backend real: auth tipo JWT HMAC, roles, validacion, rate limit, logs, errores globales, jobs y streams.
 - Monorepo: Turbo coordina apps y `@repo/lab-core` evita duplicar los contratos de dominio.
+
+## UI de comparacion
+
+El boton `Run comparison` ejecuta las pruebas de forma secuencial:
+
+1. Node.js / Express completa todos sus pasos.
+2. Elysia / Bun completa los mismos pasos.
+3. Cada paso actualiza el timeline, el feed y las metricas.
+
+Los presets ajustan `work`, `iterations` y `microtasks` para probar cargas mas altas sin tocar manualmente los inputs.
+
+## RSC
+
+`apps/react` es una app Vite SPA, asi que no puede consumir React Server Components reales. Para RSC de verdad habria que migrar el frontend a Next.js App Router o a un stack React Router RSC experimental. La UI actual deja la capa de consumo aislada en runners pequenos para que esa migracion sea directa si se decide hacerla.
