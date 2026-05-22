@@ -1,0 +1,24 @@
+{
+  "name": "elysiajs",
+  "version": "1.0.50",
+  "type": "module",
+  "private": true,
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/local.ts",
+    "build": "tsc --noEmit",
+    "check-types": "tsc --noEmit",
+    "lint": "echo \"elysiajs: no lint configured\""
+  },
+  "dependencies": {
+    "@repo/lab-core": "workspace:*",
+    "elysia": "latest"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "^25.9.1",
+    "@vercel/config": "^0.5.0",
+    "bun-types": "latest",
+    "typescript": "5.9.2"
+  }
+}
