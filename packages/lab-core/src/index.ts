@@ -52,6 +52,58 @@ export type BenchmarkResult = {
   maxMs: number;
 };
 
+export type PasswordHashResult = {
+  rounds: number;
+  passwordBytes: number;
+  keyLength: number;
+  p50Ms: number;
+  p95Ms: number;
+  totalMs: number;
+  sampleHash: string;
+};
+
+export type PasswordVerifyResult = {
+  rounds: number;
+  verified: number;
+  failed: number;
+  p50Ms: number;
+  p95Ms: number;
+  totalMs: number;
+};
+
+export type FileHashResult = {
+  mb: number;
+  chunkKb: number;
+  chunks: number;
+  bytes: number;
+  sha256: string;
+  totalMs: number;
+  throughputMbSec: number;
+};
+
+export type HeavyMixedResult = {
+  password: PasswordHashResult;
+  verification: PasswordVerifyResult;
+  file: FileHashResult;
+  totalMs: number;
+};
+
+export type HashingStreamPhase = "password-hash" | "password-verify" | "file-hash" | "summary";
+
+export type HashingStreamEvent = {
+  framework: string;
+  runtime: string;
+  phase: HashingStreamPhase;
+  current: number;
+  total: number;
+  progress: number;
+  elapsedMs: number;
+  message: string;
+  sampleHash?: string;
+  throughputMbSec?: number;
+  sha256?: string;
+};
+
 export const capabilities = [
   "REST CRUD in-memory",
   "JWT-style HMAC auth",
@@ -63,6 +115,8 @@ export const capabilities = [
   "background job simulation",
   "streaming response",
   "file/content analysis",
+  "password hashing and verification",
+  "large payload hashing",
   "scraper simulation",
   "event loop probes",
   "micro benchmark",

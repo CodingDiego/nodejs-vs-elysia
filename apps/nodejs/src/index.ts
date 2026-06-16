@@ -11,7 +11,12 @@ import {
   seedUsers,
   simulatedPrices,
   summarizeSamples,
+  type FileHashResult,
+  type HashingStreamEvent,
+  type HeavyMixedResult,
   type Job,
+  type PasswordHashResult,
+  type PasswordVerifyResult,
   type Product,
   type Role,
   type Sale,
@@ -55,6 +60,20 @@ const jobSchema = z.object({
 const fileSchema = z.object({
   filename: z.string().min(1),
   content: z.string().min(1),
+});
+const passwordWorkSchema = z.object({
+  rounds: z.number().int().min(1).max(60).default(8),
+  passwordLength: z.number().int().min(8).max(4096).default(64),
+  keyLength: z.number().int().min(16).max(128).default(64),
+});
+const fileHashWorkSchema = z.object({
+  mb: z.number().int().min(1).max(96).default(8),
+  chunkKb: z.number().int().min(16).max(1024).default(256),
+});
+const heavyMixedSchema = z.object({
+  rounds: z.number().int().min(1).max(40).default(6),
+  passwordLength: z.number().int().min(8).max(4096).default(64),
+  mb: z.number().int().min(1).max(96).default(8),
 });
 
 app.use(cors());
@@ -195,6 +214,63 @@ app.post("/files/analyze", validate(fileSchema), (req, res) => {
   });
 });
 
+app.post("/heavy/password-hash", validate(passwordWorkSchema), async (req, res) => {
+  logDemo("password-hash.start", req.body);
+  const result = await passwordHashWork(req.body.rounds, req.body.passwordLength, req.body.keyLength);
+  logDemo("password-hash.finish", {
+    rounds: result.rounds,
+    p95Ms: result.p95Ms,
+    totalMs: result.totalMs,
+    sampleHash: result.sampleHash.slice(0, 12),
+  });
+  res.json({ framework: "Express", runtime: "Node.js", ...result });
+});
+
+app.post("/heavy/password-verify", validate(passwordWorkSchema), async (req, res) => {
+  logDemo("password-verify.start", req.body);
+  const result = await passwordVerifyWork(req.body.rounds, req.body.passwordLength, req.body.keyLength);
+  logDemo("password-verify.finish", {
+    rounds: result.rounds,
+    verified: result.verified,
+    p95Ms: result.p95Ms,
+    totalMs: result.totalMs,
+  });
+  res.json({ framework: "Express", runtime: "Node.js", ...result });
+});
+
+app.post("/heavy/file-hash", validate(fileHashWorkSchema), (req, res) => {
+  logDemo("file-hash.start", req.body);
+  const result = fileHashWork(req.body.mb, req.body.chunkKb);
+  logDemo("file-hash.finish", {
+    mb: result.mb,
+    chunks: result.chunks,
+    totalMs: result.totalMs,
+    throughputMbSec: result.throughputMbSec,
+    shaPrefix: result.sha256.slice(0, 12),
+  });
+  res.json({ framework: "Express", runtime: "Node.js", ...result });
+});
+
+app.post("/heavy/mixed", validate(heavyMixedSchema), async (req, res) => {
+  logDemo("mixed.start", req.body);
+  const started = performance.now();
+  const password = await passwordHashWork(req.body.rounds, req.body.passwordLength, 64);
+  const verification = await passwordVerifyWork(req.body.rounds, req.body.passwordLength, 64);
+  const file = fileHashWork(req.body.mb, 256);
+  const result: HeavyMixedResult = {
+    password,
+    verification,
+    file,
+    totalMs: roundMs(performance.now() - started),
+  };
+  logDemo("mixed.finish", {
+    rounds: req.body.rounds,
+    mb: req.body.mb,
+    totalMs: result.totalMs,
+  });
+  res.json({ framework: "Express", runtime: "Node.js", ...result });
+});
+
 app.get("/scraper/prices", async (_req, res) => {
   logDemo("scraper.start", { products: products.length });
   await sleep(35);
@@ -258,6 +334,38 @@ app.get("/stream", (_req, res) => {
       res.end();
     }
   }, 180);
+});
+
+app.get("/heavy/hashing-stream", async (req, res, next) => {
+  const rounds = clampNumber(Number(req.query.rounds ?? 8), 1, 60);
+  const passwordLength = clampNumber(Number(req.query.passwordLength ?? 128), 8, 4096);
+  const keyLength = clampNumber(Number(req.query.keyLength ?? 64), 16, 128);
+  const fileMb = clampNumber(Number(req.query.fileMb ?? 16), 1, 128);
+  const chunkKb = clampNumber(Number(req.query.chunkKb ?? 256), 16, 1024);
+  const started = performance.now();
+
+  logDemo("hashing-stream.start", { rounds, passwordLength, keyLength, fileMb, chunkKb });
+
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  const send = (event: Omit<HashingStreamEvent, "framework" | "runtime">) => {
+    const payload: HashingStreamEvent = {
+      framework: "Express",
+      runtime: "Node.js",
+      ...event,
+    };
+    res.write(JSON.stringify(payload) + "\n");
+  };
+
+  try {
+    await streamHashingWork({ rounds, passwordLength, keyLength, fileMb, chunkKb, started, send });
+    logDemo("hashing-stream.finish", { rounds, fileMb, totalMs: roundMs(performance.now() - started) });
+    res.end();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -427,6 +535,201 @@ async function benchmark(iterations: number, work: number) {
   }
 
   return summarizeSamples(samples, iterations, work);
+}
+
+async function passwordHashWork(rounds: number, passwordLength: number, keyLength: number): Promise<PasswordHashResult> {
+  const samples: number[] = [];
+  let sampleHash = "";
+  const totalStarted = performance.now();
+
+  for (let index = 0; index < rounds; index += 1) {
+    const password = deterministicPassword(index, passwordLength);
+    const salt = `node-vs-elysia-salt-${index}`;
+    const started = performance.now();
+    const hash = await scrypt(password, salt, keyLength);
+    samples.push(performance.now() - started);
+    if (index === 0) sampleHash = hash.toString("hex");
+  }
+
+  const summary = summarizeSamples(samples, rounds, 0);
+
+  return {
+    rounds,
+    passwordBytes: Buffer.byteLength(deterministicPassword(0, passwordLength)),
+    keyLength,
+    p50Ms: summary.p50Ms,
+    p95Ms: summary.p95Ms,
+    totalMs: roundMs(performance.now() - totalStarted),
+    sampleHash,
+  };
+}
+
+async function passwordVerifyWork(rounds: number, passwordLength: number, keyLength: number): Promise<PasswordVerifyResult> {
+  const hashes: Buffer[] = [];
+  const samples: number[] = [];
+  let verified = 0;
+  let failed = 0;
+  const totalStarted = performance.now();
+
+  for (let index = 0; index < rounds; index += 1) {
+    hashes.push(await scrypt(deterministicPassword(index, passwordLength), `node-vs-elysia-salt-${index}`, keyLength));
+  }
+
+  for (let index = 0; index < rounds; index += 1) {
+    const started = performance.now();
+    const candidate = await scrypt(deterministicPassword(index, passwordLength), `node-vs-elysia-salt-${index}`, keyLength);
+    samples.push(performance.now() - started);
+    if (crypto.timingSafeEqual(candidate, hashes[index]!)) verified += 1;
+    else failed += 1;
+  }
+
+  const summary = summarizeSamples(samples, rounds, 0);
+
+  return {
+    rounds,
+    verified,
+    failed,
+    p50Ms: summary.p50Ms,
+    p95Ms: summary.p95Ms,
+    totalMs: roundMs(performance.now() - totalStarted),
+  };
+}
+
+function fileHashWork(mb: number, chunkKb: number): FileHashResult {
+  const started = performance.now();
+  const hash = crypto.createHash("sha256");
+  const chunkBytes = chunkKb * 1024;
+  const totalBytes = mb * 1024 * 1024;
+  const chunk = Buffer.allocUnsafe(chunkBytes);
+  let written = 0;
+  let chunks = 0;
+
+  while (written < totalBytes) {
+    const size = Math.min(chunkBytes, totalBytes - written);
+    for (let index = 0; index < size; index += 1) {
+      chunk[index] = (written + index) % 251;
+    }
+    hash.update(size === chunkBytes ? chunk : chunk.subarray(0, size));
+    written += size;
+    chunks += 1;
+  }
+
+  const totalMs = roundMs(performance.now() - started);
+
+  return {
+    mb,
+    chunkKb,
+    chunks,
+    bytes: totalBytes,
+    sha256: hash.digest("hex"),
+    totalMs,
+    throughputMbSec: roundMs(mb / Math.max(totalMs / 1000, 0.001)),
+  };
+}
+
+async function streamHashingWork({
+  rounds,
+  passwordLength,
+  keyLength,
+  fileMb,
+  chunkKb,
+  started,
+  send,
+}: {
+  rounds: number;
+  passwordLength: number;
+  keyLength: number;
+  fileMb: number;
+  chunkKb: number;
+  started: number;
+  send: (event: Omit<HashingStreamEvent, "framework" | "runtime">) => void;
+}) {
+  const hashes: Buffer[] = [];
+  const totalSteps = rounds * 2 + Math.ceil((fileMb * 1024) / chunkKb);
+  let completed = 0;
+  let sampleHash = "";
+
+  const publish = (
+    phase: HashingStreamEvent["phase"],
+    current: number,
+    total: number,
+    message: string,
+    extras: Partial<HashingStreamEvent> = {},
+  ) => {
+    send({
+      phase,
+      current,
+      total,
+      progress: Math.round((completed / totalSteps) * 100),
+      elapsedMs: roundMs(performance.now() - started),
+      message,
+      ...extras,
+    });
+  };
+
+  for (let index = 0; index < rounds; index += 1) {
+    const hash = await scrypt(deterministicPassword(index, passwordLength), `node-vs-elysia-salt-${index}`, keyLength);
+    hashes.push(hash);
+    if (index === 0) sampleHash = hash.toString("hex");
+    completed += 1;
+    publish("password-hash", index + 1, rounds, `Derived password key ${index + 1}/${rounds}`, {
+      sampleHash: sampleHash.slice(0, 24),
+    });
+  }
+
+  let verified = 0;
+  for (let index = 0; index < rounds; index += 1) {
+    const candidate = await scrypt(deterministicPassword(index, passwordLength), `node-vs-elysia-salt-${index}`, keyLength);
+    if (crypto.timingSafeEqual(candidate, hashes[index]!)) verified += 1;
+    completed += 1;
+    publish("password-verify", index + 1, rounds, `Verified password ${verified}/${rounds}`);
+  }
+
+  const hashStarted = performance.now();
+  const digest = crypto.createHash("sha256");
+  const chunkBytes = chunkKb * 1024;
+  const totalBytes = fileMb * 1024 * 1024;
+  const totalChunks = Math.ceil(totalBytes / chunkBytes);
+  const chunk = Buffer.allocUnsafe(chunkBytes);
+  let written = 0;
+  let chunks = 0;
+
+  while (written < totalBytes) {
+    const size = Math.min(chunkBytes, totalBytes - written);
+    for (let index = 0; index < size; index += 1) {
+      chunk[index] = (written + index) % 251;
+    }
+    digest.update(size === chunkBytes ? chunk : chunk.subarray(0, size));
+    written += size;
+    chunks += 1;
+    completed += 1;
+
+    const fileElapsed = performance.now() - hashStarted;
+    publish("file-hash", chunks, totalChunks, `Hashed ${Math.round(written / 1024 / 1024)}MB/${fileMb}MB`, {
+      throughputMbSec: roundMs(written / 1024 / 1024 / Math.max(fileElapsed / 1000, 0.001)),
+    });
+
+    if (chunks % 2 === 0) await sleep(0);
+  }
+
+  publish("summary", totalSteps, totalSteps, `Hashing benchmark complete: ${roundMs(performance.now() - started)} ms`, {
+    progress: 100,
+    sha256: digest.digest("hex"),
+  });
+}
+
+function deterministicPassword(index: number, length: number) {
+  const seed = `correct-horse-battery-staple-${index}-`;
+  return seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
+}
+
+function scrypt(password: string, salt: string, keyLength: number) {
+  return new Promise<Buffer>((resolve, reject) => {
+    crypto.scrypt(password, salt, keyLength, { N: 16_384, r: 8, p: 1 }, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
 }
 
 function sleep(ms: number) {

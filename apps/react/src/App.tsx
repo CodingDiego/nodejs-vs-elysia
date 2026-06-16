@@ -1,5 +1,15 @@
-import { useCallback, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import type { BenchmarkResult, EventLoopProbe, Job, Product } from "@repo/lab-core";
+import { useCallback, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import type {
+  BenchmarkResult,
+  EventLoopProbe,
+  FileHashResult,
+  HashingStreamEvent,
+  HeavyMixedResult,
+  Job,
+  PasswordHashResult,
+  PasswordVerifyResult,
+  Product,
+} from "@repo/lab-core";
 import {
   Activity,
   Braces,
@@ -59,7 +69,17 @@ type ScraperPayload = {
 type BackendMap<T> = Record<BackendKey, T | null>;
 type BackendStatus = "idle" | "running" | "online" | "error";
 type BusyAction = "compare" | "auth" | "jobs" | "file" | null;
-type StepKey = "health" | "features" | "products" | "scraper" | "eventLoop" | "benchmark";
+type StepKey =
+  | "health"
+  | "features"
+  | "products"
+  | "scraper"
+  | "eventLoop"
+  | "passwordHash"
+  | "passwordVerify"
+  | "fileHash"
+  | "mixed"
+  | "benchmark";
 type StepStatus = "idle" | "running" | "done" | "error";
 type Preset = {
   name: string;
@@ -67,6 +87,8 @@ type Preset = {
   work: number;
   iterations: number;
   microtasks: number;
+  passwordRounds: number;
+  fileMb: number;
 };
 type FeedEntry = {
   id: string;
@@ -101,6 +123,10 @@ const steps: Array<{ key: StepKey; label: string; icon: ReactNode }> = [
   { key: "products", label: "Products", icon: <Braces size={16} /> },
   { key: "scraper", label: "Scraper", icon: <RadioTower size={16} /> },
   { key: "eventLoop", label: "Event loop", icon: <TimerReset size={16} /> },
+  { key: "passwordHash", label: "Password hash", icon: <KeyRound size={16} /> },
+  { key: "passwordVerify", label: "Password verify", icon: <ShieldCheck size={16} /> },
+  { key: "fileHash", label: "File hash", icon: <Cpu size={16} /> },
+  { key: "mixed", label: "Mixed heavy", icon: <Sparkles size={16} /> },
   { key: "benchmark", label: "Benchmark", icon: <Gauge size={16} /> },
 ];
 
@@ -111,6 +137,8 @@ const presets: Preset[] = [
     work: 18,
     iterations: 40,
     microtasks: 200,
+    passwordRounds: 3,
+    fileMb: 4,
   },
   {
     name: "Heavy",
@@ -118,6 +146,8 @@ const presets: Preset[] = [
     work: 24,
     iterations: 120,
     microtasks: 1000,
+    passwordRounds: 8,
+    fileMb: 16,
   },
   {
     name: "Timer pressure",
@@ -125,6 +155,8 @@ const presets: Preset[] = [
     work: 20,
     iterations: 80,
     microtasks: 5000,
+    passwordRounds: 6,
+    fileMb: 12,
   },
   {
     name: "Stress",
@@ -132,6 +164,8 @@ const presets: Preset[] = [
     work: 28,
     iterations: 220,
     microtasks: 2500,
+    passwordRounds: 14,
+    fileMb: 32,
   },
 ];
 
@@ -139,6 +173,9 @@ const emptyHealth: BackendMap<Health> = { node: null, elysia: null };
 const emptyProbe: BackendMap<EventLoopProbe> = { node: null, elysia: null };
 const emptyBenchmark: BackendMap<BenchmarkResult> = { node: null, elysia: null };
 const emptyJobs: BackendMap<Job> = { node: null, elysia: null };
+const emptyPasswordHash: BackendMap<PasswordHashResult> = { node: null, elysia: null };
+const emptyFileHash: BackendMap<FileHashResult> = { node: null, elysia: null };
+const emptyMixed: BackendMap<HeavyMixedResult> = { node: null, elysia: null };
 const emptyStatus: Record<BackendKey, BackendStatus> = { node: "idle", elysia: "idle" };
 const emptyStepStatus: Record<BackendKey, Record<StepKey, StepStatus>> = {
   node: createStepStatus(),
@@ -146,10 +183,16 @@ const emptyStepStatus: Record<BackendKey, Record<StepKey, StepStatus>> = {
 };
 
 function App() {
+  return window.location.pathname === "/hashing" ? <HashingPage /> : <MainLabPage />;
+}
+
+function MainLabPage() {
   const [theme, setTheme] = useState<Theme>("dark");
   const [work, setWork] = useState(18);
   const [iterations, setIterations] = useState(40);
   const [microtasks, setMicrotasks] = useState(200);
+  const [passwordRounds, setPasswordRounds] = useState(3);
+  const [fileMb, setFileMb] = useState(4);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [error, setError] = useState("");
   const [token, setToken] = useState("");
@@ -157,6 +200,9 @@ function App() {
   const [features, setFeatures] = useState<FeaturePayload | null>(null);
   const [eventLoop, setEventLoop] = useState(emptyProbe);
   const [benchmark, setBenchmark] = useState(emptyBenchmark);
+  const [passwordHash, setPasswordHash] = useState(emptyPasswordHash);
+  const [fileHashWork, setFileHashWork] = useState(emptyFileHash);
+  const [mixedWork, setMixedWork] = useState(emptyMixed);
   const [jobs, setJobs] = useState(emptyJobs);
   const [backendStatus, setBackendStatus] = useState(emptyStatus);
   const [stepStatus, setStepStatus] = useState(emptyStepStatus);
@@ -239,13 +285,48 @@ function App() {
       return `total ${formatMs(result.totalMs)}, timer ${formatMs(result.timerDelayMs)}`;
     }
 
+    if (step === "passwordHash") {
+      const result = await requestBackend<PasswordHashResult>(backend, "/heavy/password-hash", {
+        method: "POST",
+        body: JSON.stringify({ rounds: passwordRounds, passwordLength: 128, keyLength: 64 }),
+      });
+      setPasswordHash((current) => ({ ...current, [backend.key]: result }));
+      return `${result.rounds} hashes, p95 ${formatMs(result.p95Ms)}`;
+    }
+
+    if (step === "passwordVerify") {
+      const result = await requestBackend<PasswordVerifyResult>(backend, "/heavy/password-verify", {
+        method: "POST",
+        body: JSON.stringify({ rounds: passwordRounds, passwordLength: 128, keyLength: 64 }),
+      });
+      return `${result.verified}/${result.rounds} verified, total ${formatMs(result.totalMs)}`;
+    }
+
+    if (step === "fileHash") {
+      const result = await requestBackend<FileHashResult>(backend, "/heavy/file-hash", {
+        method: "POST",
+        body: JSON.stringify({ mb: fileMb, chunkKb: 256 }),
+      });
+      setFileHashWork((current) => ({ ...current, [backend.key]: result }));
+      return `${result.mb}MB, ${result.throughputMbSec} MB/s`;
+    }
+
+    if (step === "mixed") {
+      const result = await requestBackend<HeavyMixedResult>(backend, "/heavy/mixed", {
+        method: "POST",
+        body: JSON.stringify({ rounds: Math.max(1, Math.floor(passwordRounds / 2)), passwordLength: 128, mb: fileMb }),
+      });
+      setMixedWork((current) => ({ ...current, [backend.key]: result }));
+      return `password + verify + ${result.file.mb}MB in ${formatMs(result.totalMs)}`;
+    }
+
     const result = await requestBackend<BenchmarkResult>(
       backend,
       `/benchmark?iterations=${config.iterations}&work=${config.work}`,
     );
     setBenchmark((current) => ({ ...current, [backend.key]: result }));
     return `p95 ${formatMs(result.p95Ms)}, max ${formatMs(result.maxMs)}`;
-  }, []);
+  }, [fileMb, passwordRounds]);
 
   const runComparison = useCallback(async () => {
     setBusy("compare");
@@ -351,6 +432,8 @@ function App() {
     setWork(preset.work);
     setIterations(preset.iterations);
     setMicrotasks(preset.microtasks);
+    setPasswordRounds(preset.passwordRounds);
+    setFileMb(preset.fileMb);
   }, []);
 
   const toggleTheme = useCallback(() => {
@@ -389,6 +472,10 @@ function App() {
             <Braces size={18} />
             File probe
           </button>
+          <a className="navButton" href="/hashing">
+            <Cpu size={18} />
+            Hashing lab
+          </a>
         </div>
       </section>
 
@@ -407,6 +494,8 @@ function App() {
           <NumberField label="CPU work" min={5} max={34} value={work} onChange={setWork} />
           <NumberField label="Iterations" min={1} max={500} value={iterations} onChange={setIterations} />
           <NumberField label="Microtasks" min={0} max={5000} value={microtasks} onChange={setMicrotasks} />
+          <NumberField label="Password rounds" min={1} max={60} value={passwordRounds} onChange={setPasswordRounds} />
+          <NumberField label="File MB" min={1} max={96} value={fileMb} onChange={setFileMb} />
           <div className="winner">
             <span>Sequential progress</span>
             <strong>{progress}%</strong>
@@ -460,6 +549,9 @@ function App() {
             status={backendStatus[backend.key]}
             eventLoop={eventLoop[backend.key]}
             benchmark={benchmark[backend.key]}
+            passwordHash={passwordHash[backend.key]}
+            fileHashWork={fileHashWork[backend.key]}
+            mixedWork={mixedWork[backend.key]}
             job={jobs[backend.key]}
             fileHash={fileHashes[backend.key]}
           />
@@ -491,6 +583,175 @@ function App() {
         </div>
       </section>
     </main>
+  );
+}
+
+type HashingBackendState = {
+  status: "idle" | "streaming" | "done" | "error";
+  progress: number;
+  elapsedMs: number;
+  phase: HashingStreamEvent["phase"] | "idle";
+  message: string;
+  sha256: string;
+  throughputMbSec: number | null;
+  events: HashingStreamEvent[];
+};
+
+const emptyHashingState: Record<BackendKey, HashingBackendState> = {
+  node: createHashingState(),
+  elysia: createHashingState(),
+};
+
+function HashingPage() {
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [rounds, setRounds] = useState(8);
+  const [fileMb, setFileMb] = useState(24);
+  const [chunkKb, setChunkKb] = useState(256);
+  const [states, setStates] = useState(emptyHashingState);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+
+  const leader = useMemo(() => {
+    const node = states.node.status === "done" ? states.node.elapsedMs : null;
+    const elysia = states.elysia.status === "done" ? states.elysia.elapsedMs : null;
+    if (typeof node !== "number" || typeof elysia !== "number") return "waiting for both streams";
+    if (node === elysia) return "tie";
+    return node < elysia ? "Node.js finished first" : "Elysia finished first";
+  }, [states]);
+
+  const runHashing = useCallback(async () => {
+    setRunning(true);
+    setError("");
+    setStates({ node: createHashingState(), elysia: createHashingState() });
+
+    try {
+      await Promise.all(backends.map((backend) => streamHashingBenchmark(backend, { rounds, fileMb, chunkKb }, setStates)));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Hashing stream failed");
+    } finally {
+      setRunning(false);
+    }
+  }, [chunkKb, fileMb, rounds]);
+
+  const applyHashPreset = useCallback((nextRounds: number, nextFileMb: number, nextChunkKb: number) => {
+    setRounds(nextRounds);
+    setFileMb(nextFileMb);
+    setChunkKb(nextChunkKb);
+  }, []);
+
+  return (
+    <main className="appShell hashingShell" data-theme={theme}>
+      <section className="hashHero">
+        <div>
+          <p className="eyebrow">Dedicated streaming benchmark</p>
+          <h1>Hashing lab</h1>
+          <p className="lede">
+            Password derivation, verification, and generated file hashing stream progress as NDJSON from each backend.
+          </p>
+        </div>
+        <div className="commandBar">
+          <button type="button" className="themeButton" onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))} aria-label="Toggle theme">
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+          <a className="navButton" href="/">
+            <Activity size={18} />
+            Main lab
+          </a>
+          <button type="button" className="primary" onClick={runHashing} disabled={running}>
+            {running ? <RefreshCw className="spin" size={18} /> : <Play size={18} />}
+            Run hashing stream
+          </button>
+        </div>
+      </section>
+
+      <section className="hashControls">
+        <div className="presetRail">
+          <button type="button" className="presetButton" onClick={() => applyHashPreset(4, 8, 256)} disabled={running}>
+            <Sparkles size={15} />
+            <span>Warmup</span>
+            <small>Fast local signal.</small>
+          </button>
+          <button type="button" className="presetButton" onClick={() => applyHashPreset(10, 32, 256)} disabled={running}>
+            <Sparkles size={15} />
+            <span>Heavy hashing</span>
+            <small>More password rounds and file bytes.</small>
+          </button>
+          <button type="button" className="presetButton" onClick={() => applyHashPreset(16, 64, 128)} disabled={running}>
+            <Sparkles size={15} />
+            <span>Chunk pressure</span>
+            <small>More stream updates.</small>
+          </button>
+          <button type="button" className="presetButton" onClick={() => applyHashPreset(24, 96, 256)} disabled={running}>
+            <Sparkles size={15} />
+            <span>Stress</span>
+            <small>Slow enough to watch clearly.</small>
+          </button>
+        </div>
+
+        <div className="controlInputs">
+          <NumberField label="Password rounds" min={1} max={60} value={rounds} onChange={setRounds} />
+          <NumberField label="File MB" min={1} max={128} value={fileMb} onChange={setFileMb} />
+          <NumberField label="Chunk KB" min={16} max={1024} value={chunkKb} onChange={setChunkKb} />
+          <div className="winner">
+            <span>Current leader</span>
+            <strong>{leader}</strong>
+          </div>
+        </div>
+      </section>
+
+      {error ? <div className="notice error">{error}</div> : null}
+
+      <section className="hashGrid">
+        {backends.map((backend) => (
+          <HashingPanel key={backend.key} backend={backend} state={states[backend.key]} />
+        ))}
+      </section>
+    </main>
+  );
+}
+
+function HashingPanel({ backend, state }: { backend: Backend; state: HashingBackendState }) {
+  return (
+    <article className="hashPanel" style={{ "--accent": backend.accent } as CSSProperties}>
+      <header className="backendHeader">
+        <div>
+          <span>{backend.runtime}</span>
+          <h2>{backend.framework}</h2>
+        </div>
+        <KeyRound size={28} />
+      </header>
+
+      <div className={`hashProgress ${state.status}`}>
+        <div className="hashProgressRing" style={{ "--progress": `${state.progress}%` } as CSSProperties}>
+          <strong>{state.progress}%</strong>
+        </div>
+        <div>
+          <span>{state.phase}</span>
+          <p>{state.message || "Ready to stream hashing events."}</p>
+        </div>
+      </div>
+
+      <div className="metricGrid">
+        <Metric icon={<Clock3 size={18} />} label="Elapsed" value={formatMs(state.elapsedMs || undefined)} />
+        <Metric icon={<Cpu size={18} />} label="Throughput" value={state.throughputMbSec ? `${state.throughputMbSec} MB/s` : "pending"} />
+      </div>
+
+      <div className="hashDigest">
+        <span>Final SHA-256</span>
+        <code>{state.sha256 ? state.sha256.slice(0, 48) : "pending"}</code>
+      </div>
+
+      <div className="streamLog">
+        {state.events.length === 0 ? <p className="emptyFeed">Waiting for stream chunks.</p> : null}
+        {state.events.map((event, index) => (
+          <div key={`${event.phase}-${event.current}-${index}`} className="streamEvent">
+            <span>{event.phase}</span>
+            <strong>{event.message}</strong>
+            <small>{formatMs(event.elapsedMs)}</small>
+          </div>
+        ))}
+      </div>
+    </article>
   );
 }
 
@@ -535,6 +796,9 @@ function BackendPanel({
   status,
   eventLoop,
   benchmark,
+  passwordHash,
+  fileHashWork,
+  mixedWork,
   job,
   fileHash,
 }: {
@@ -543,6 +807,9 @@ function BackendPanel({
   status: BackendStatus;
   eventLoop: EventLoopProbe | null;
   benchmark: BenchmarkResult | null;
+  passwordHash: PasswordHashResult | null;
+  fileHashWork: FileHashResult | null;
+  mixedWork: HeavyMixedResult | null;
   job: Job | null;
   fileHash: FileProbe | null;
 }) {
@@ -562,8 +829,8 @@ function BackendPanel({
       <div className="metricGrid">
         <Metric icon={<Activity size={18} />} label="Health" value={statusLabel(status, health)} />
         <Metric icon={<Clock3 size={18} />} label="Timer delay" value={formatMs(eventLoop?.timerDelayMs)} />
-        <Metric icon={<Gauge size={18} />} label="Event total" value={formatMs(eventLoop?.totalMs)} />
-        <Metric icon={<Zap size={18} />} label="Benchmark p95" value={formatMs(benchmark?.p95Ms)} />
+        <Metric icon={<KeyRound size={18} />} label="Password p95" value={formatMs(passwordHash?.p95Ms)} />
+        <Metric icon={<Cpu size={18} />} label="File hash" value={fileHashWork ? `${fileHashWork.throughputMbSec} MB/s` : "pending"} />
       </div>
 
       <div className="rows">
@@ -571,6 +838,9 @@ function BackendPanel({
         <Row label="Async wait" value={formatMs(eventLoop?.asyncWaitMs)} />
         <Row label="Benchmark p50" value={formatMs(benchmark?.p50Ms)} />
         <Row label="Benchmark max" value={formatMs(benchmark?.maxMs)} />
+        <Row label="Password total" value={formatMs(passwordHash?.totalMs)} />
+        <Row label="File total" value={formatMs(fileHashWork?.totalMs)} />
+        <Row label="Mixed heavy" value={formatMs(mixedWork?.totalMs)} />
         <Row label="Last job" value={job ? `${job.kind} / ${job.status}` : "not queued"} />
         <Row label="File SHA" value={fileHash ? fileHash.sha256.slice(0, 16) : "not analyzed"} />
       </div>
@@ -624,6 +894,89 @@ function NumberField({
   );
 }
 
+function createHashingState(): HashingBackendState {
+  return {
+    status: "idle",
+    progress: 0,
+    elapsedMs: 0,
+    phase: "idle",
+    message: "",
+    sha256: "",
+    throughputMbSec: null,
+    events: [],
+  };
+}
+
+async function streamHashingBenchmark(
+  backend: Backend,
+  config: { rounds: number; fileMb: number; chunkKb: number },
+  setStates: Dispatch<SetStateAction<Record<BackendKey, HashingBackendState>>>,
+) {
+  setStates((current) => ({
+    ...current,
+    [backend.key]: { ...current[backend.key], status: "streaming", message: "Opening stream..." },
+  }));
+
+  const params = new URLSearchParams({
+    rounds: String(config.rounds),
+    passwordLength: "128",
+    keyLength: "64",
+    fileMb: String(config.fileMb),
+    chunkKb: String(config.chunkKb),
+  });
+  const response = await fetch(`${backend.url}/heavy/hashing-stream?${params}`, {
+    signal: AbortSignal.timeout(180000),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`${backend.name} hashing stream failed with ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let lastEvent: HashingStreamEvent | null = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffered += decoder.decode(value, { stream: true });
+    const lines = buffered.split("\n");
+    buffered = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as HashingStreamEvent;
+      lastEvent = event;
+
+      setStates((current) => ({
+        ...current,
+        [backend.key]: {
+          ...current[backend.key],
+          status: event.phase === "summary" ? "done" : "streaming",
+          progress: event.progress,
+          elapsedMs: event.elapsedMs,
+          phase: event.phase,
+          message: event.message,
+          sha256: event.sha256 ?? current[backend.key].sha256,
+          throughputMbSec: event.throughputMbSec ?? current[backend.key].throughputMbSec,
+          events: [event, ...current[backend.key].events].slice(0, 32),
+        },
+      }));
+    }
+  }
+
+  setStates((current) => ({
+    ...current,
+    [backend.key]: {
+      ...current[backend.key],
+      status: lastEvent?.phase === "summary" ? "done" : "error",
+      message: lastEvent?.message ?? "Stream ended without summary.",
+    },
+  }));
+}
+
 async function compare<T>(path: string, init?: RequestInit): Promise<BackendMap<T>> {
   const entries = await Promise.allSettled(
     backends.map(async (backend) => {
@@ -673,6 +1026,10 @@ function createStepStatus(): Record<StepKey, StepStatus> {
     products: "idle",
     scraper: "idle",
     eventLoop: "idle",
+    passwordHash: "idle",
+    passwordVerify: "idle",
+    fileHash: "idle",
+    mixed: "idle",
     benchmark: "idle",
   };
 }
